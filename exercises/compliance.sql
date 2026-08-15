@@ -40,13 +40,13 @@ CREATE TABLE credential_types (
 	credential_name VARCHAR(255)
 );
 
-DROP TABLE role_sites_requirements
-CREATE TABLE role_sites_requirements (
+DROP TABLE role_credentials_requirements
+CREATE TABLE role_credentials_requirements (
 	requirement_id INT PRIMARY KEY,
 	project_id INT,
 	role_id INT,
 	credential_type_id INT,
-	is_mandatory BIT
+	is_mandatory INT
 );
 
 CREATE TABLE worker_credentials (
@@ -90,7 +90,8 @@ INSERT INTO credential_types VALUES
 (7, 'Secure Coding Certification'),
 (8, 'Git/DevOps Certification');
 
-INSERT INTO role_sites_requirements VALUES
+INSERT INTO role_credentials_requirements
+VALUES
 -- Data Engineer Requirements
 (1, 10, 100, 1, 1),
 (2, 10, 100, 2, 1),
@@ -136,3 +137,98 @@ INSERT INTO worker_credentials VALUES
 (1032, 110, 3, 'SAT-110', 'Verified', '2026-01-01', '2027-01-01', '2026-01-01'),
 (1033, 110, 5, 'PBI-110', 'Verified', '2026-02-01', '2026-09-10', '2026-02-01');
 
+
+SELECT * FROM organizations
+SELECT * FROM workers
+SELECT * FROM projects
+SELECT * FROM roles
+SELECT * FROM credential_types
+SELECT * FROM worker_assignments
+SELECT * FROM role_credentials_requirements
+SELECT * FROM worker_credentials
+
+UPDATE roles
+SET role_id = 400
+WHERE role_id = 300
+
+--  Step 4: Create a separate Compliance Check table starting from worker_assignments table
+WITH workers_name_org AS (
+	SELECT 
+		wa.assignment_id,
+		wa.worker_id,
+		wa.project_id,
+		wa.role_id,
+		w.worker_name
+	FROM worker_assignments wa
+	LEFT JOIN workers w
+		ON wa.worker_id = w.worker_id
+)
+, workers_projects_roleName AS(
+	SELECT 
+		wnm.assignment_id,
+		wnm.worker_id, 
+		wnm.project_id,
+		wnm.role_id,
+		wnm.worker_name,
+		p.project_name,
+		r.role_name
+	FROM workers_name_org wnm
+	LEFT JOIN projects p
+		ON wnm.project_id = p.project_id
+	LEFT JOIN roles r
+		ON wnm.role_id = r.role_id
+
+
+)
+--, fact_workers_check AS (
+
+	SELECT 
+		wpr.worker_id,
+		wpr.worker_name,
+		wpr.role_id,
+		wpr.role_name,
+		wpr.project_id,
+		wpr.project_name,
+		rcr.is_mandatory,
+		ct.credential_type_id,
+		ct.credential_name,
+		wc.worker_credential_id,
+		wc.credential_number,
+		wc.verification_status,
+		wc.issued_date,
+		wc.expiry_date,
+		wc.uploaded_at,
+		COUNT(ct.credential_type_id) AS total_required_credentials,
+		SUM(rcr.is_mandatory) AS valid_credentials_count,
+		--M(mandatory) AS valid_credentials_count,
+		COUNT(ct.credential_type_id) - SUM(rcr.is_mandatory) AS missing_or_valid_credentials_count,
+		--UNT(ct.credential_type_id) - SUM(is_mandatory) AS missing_or_invalid_credentials_count,
+		CASE WHEN COUNT(ct.credential_type_id) = COUNT(*)
+				THEN 'Compliant'
+			ELSE 'Non-Compliant'
+		
+		END AS compliance_status
+	FROM workers_projects_roleName wpr
+	LEFT JOIN role_credentials_requirements rcr
+		ON rcr.role_id = wpr.role_id
+			---AND rcr.project_id = wpr.project_id
+	LEFT JOIN credential_types ct
+		ON ct.credential_type_id = rcr.credential_type_id
+	LEFT JOIN worker_credentials wc
+		ON ct.credential_type_id = wc.credential_type_id
+		AND wpr.worker_id = wc.worker_id
+	GROUP BY
+		wpr.worker_id,
+		wpr.worker_name,
+		wpr.role_id,
+		wpr.role_name,
+		wpr.project_id,
+		wpr.project_name,
+		ct.credential_type_id,
+		ct.credential_name,
+		wc.worker_credential_id,
+		wc.credential_number,
+		wc.verification_status,
+		wc.issued_date,
+		wc.expiry_date,
+		wc.uploaded_at, rcr.is_mandatory

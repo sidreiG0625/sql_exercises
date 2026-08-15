@@ -180,7 +180,7 @@ WITH workers_name_org AS (
 
 
 )
---, fact_workers_check AS (
+, fact_workers_check AS (
 
 	SELECT 
 		wpr.worker_id,
@@ -197,17 +197,8 @@ WITH workers_name_org AS (
 		wc.verification_status,
 		wc.issued_date,
 		wc.expiry_date,
-		wc.uploaded_at,
-		COUNT(ct.credential_type_id) AS total_required_credentials,
-		SUM(rcr.is_mandatory) AS valid_credentials_count,
-		--M(mandatory) AS valid_credentials_count,
-		COUNT(ct.credential_type_id) - SUM(rcr.is_mandatory) AS missing_or_valid_credentials_count,
-		--UNT(ct.credential_type_id) - SUM(is_mandatory) AS missing_or_invalid_credentials_count,
-		CASE WHEN COUNT(ct.credential_type_id) = COUNT(*)
-				THEN 'Compliant'
-			ELSE 'Non-Compliant'
-		
-		END AS compliance_status
+		wc.uploaded_at
+	
 	FROM workers_projects_roleName wpr
 	LEFT JOIN role_credentials_requirements rcr
 		ON rcr.role_id = wpr.role_id
@@ -217,18 +208,109 @@ WITH workers_name_org AS (
 	LEFT JOIN worker_credentials wc
 		ON ct.credential_type_id = wc.credential_type_id
 		AND wpr.worker_id = wc.worker_id
-	GROUP BY
-		wpr.worker_id,
-		wpr.worker_name,
-		wpr.role_id,
-		wpr.role_name,
-		wpr.project_id,
-		wpr.project_name,
-		ct.credential_type_id,
-		ct.credential_name,
-		wc.worker_credential_id,
-		wc.credential_number,
-		wc.verification_status,
-		wc.issued_date,
-		wc.expiry_date,
-		wc.uploaded_at, rcr.is_mandatory
+) 
+
+-- Returns a table that will summarize all the submitted credentials and the required credentials of the workers and
+-- Insert the returned records to fact_workers_check_compliance table for reporting reasons
+SELECT *
+INTO fact_workers_check_compliance
+FROM fact_workers_check
+
+-- Create a separate summary table to check workers who are compliant
+
+WITH credential_count AS (
+	SELECT
+	worker_id
+	, worker_name
+	, role_name
+	, project_name
+	, credential_type_id
+	, credential_name
+	, verification_status
+	, expiry_date
+	, DATEDIFF(DAY, GETDATE(), expiry_date) AS days_to_expire
+	, CASE
+		WHEN verification_status = 'Verified' AND expiry_date > GETDATE() /*AND DATEDIFF(DAY, GETDATE(), expiry_date) >= 30*/ THEN 1
+		ELSE 0
+	  END AS credential_count
+	  , SUM(SUM(CASE
+		WHEN verification_status = 'Verified' AND expiry_date > GETDATE() /*AND DATEDIFF(DAY, GETDATE(), expiry_date) >= 30*/ THEN 1
+		ELSE 0
+	  END)) OVER(PARTITION BY worker_id) AS actual_credential_count
+	, COUNT(CASE
+		WHEN verification_status = 'Verified' AND expiry_date > GETDATE() /*AND DATEDIFF(DAY, GETDATE(), expiry_date) >= 30*/ THEN 1
+		ELSE 0
+	  END) OVER(PARTITION BY worker_name) total_credential_count
+	, CASE WHEN 
+				COUNT(CASE
+				WHEN verification_status = 'Verified' AND expiry_date > GETDATE() /*AND DATEDIFF(DAY, GETDATE(), expiry_date) >= 30*/ THEN 1
+				ELSE 0
+			  END) OVER(PARTITION BY worker_name) = 
+			  SUM(SUM(CASE
+				WHEN verification_status = 'Verified' AND expiry_date > GETDATE() /*AND DATEDIFF(DAY, GETDATE(), expiry_date) >= 30*/ THEN 1
+				ELSE 0
+			  END)) OVER(PARTITION BY worker_id) 
+
+		THEN 'Compliant' 
+		ELSE 'Non-Compliant'
+	END AS compliance_status
+	FROM fact_workers_check_compliance
+	GROUP BY worker_id, worker_name
+	, role_name
+	, project_name
+	, credential_type_id
+	, credential_name
+	, verification_status
+	, expiry_date  
+)
+-- Returns the records of workers who are Compliant and Non-Compliant
+-- Load the records into a new table compliance_summary_by_worker for reporting
+
+SELECT DISTINCT
+  worker_id
+  , worker_name
+  , role_name
+  , actual_credential_count
+  , total_credential_count
+  , compliance_status
+INTO compliance_summary_by_worker
+FROM credential_count
+
+-- Create a table to return credentials that will expire in next 30 days
+	SELECT 
+		worker_id
+		, worker_name
+		, role_name
+		, project_name
+		, credential_type_id
+		, credential_name
+		, verification_status
+		, expiry_date
+		, DATEDIFF(DAY, GETDATE(), expiry_date) AS days_to_expire
+		, CASE WHEN
+			expiry_date > GETDATE() AND DATEDIFF(DAY, GETDATE(), expiry_date) <= 30 THEN 'Yes'
+			ELSE 'No'
+		END AS is_expire_in_30_days
+	INTO worker_credentials_expire_in_30_days
+	FROM fact_workers_check_compliance
+	WHERE CASE WHEN
+			expiry_date > GETDATE() AND DATEDIFF(DAY, GETDATE(), expiry_date) <= 30 THEN 'Yes'
+			ELSE 'No'
+		END = 'Yes'
+
+-- Create a table to list all missing/invalid credentials
+SELECT 
+	worker_id
+	, worker_name
+	, role_name
+	, project_name
+	, credential_name
+	, credential_number
+	, verification_status
+	, issued_date
+	, expiry_date
+INTO missing_invalid_credentials
+FROM fact_workers_check_compliance
+WHERE verification_status != 'Verified' OR verification_status IS NULL OR expiry_date < GETDATE()
+
+SELECT * FROM missing_invalid_credentials
